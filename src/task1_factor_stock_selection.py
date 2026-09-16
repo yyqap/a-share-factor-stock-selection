@@ -1,196 +1,225 @@
-"""A-share factor stock selection with logistic regression.
-
-The script expects monthly cross-sectional CSV files with columns:
-month, stock, status, return, followed by factor columns.
-"""
-
-from __future__ import annotations
-
-import argparse
-from pathlib import Path
-
-import matplotlib.pyplot as plt
-import numpy as np
+import os
 import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
+# 读取所有 CSV 文件
+def load_data(folder):
+    dataframes = []
+    for file in os.listdir(folder):
+        if file.endswith('.csv'):
+            df = pd.read_csv(os.path.join(folder, file))
+            df['month'] = file.split('.')[0]  # 提取月份信息
+            dataframes.append(df)
+    return pd.concat(dataframes, ignore_index=True)
 
-def load_panel(data_dir: Path) -> pd.DataFrame:
-    frames: list[pd.DataFrame] = []
-    for csv_path in sorted(data_dir.glob("*.csv"), key=lambda p: int(p.stem)):
-        frame = pd.read_csv(csv_path)
-        if "month" not in frame.columns:
-            frame["month"] = int(csv_path.stem)
-        frames.append(frame)
+# 创建标签
+def create_labels(data):
+    data['label'] = 0  # 默认标签为0（中性）
+    data.loc[data['return'].rank(pct=True) > 0.7, 'label'] = 1   # 正例
+    data.loc[data['return'].rank(pct=True) < 0.3, 'label'] = -1  # 反例
+    return data
 
-    if not frames:
-        raise FileNotFoundError(f"No CSV files found in {data_dir}")
+# 中位数去极值法
+def depolarize(data, n=1.5):
+    for col in data.columns[4:74]:
+        x_M = data[col].median()  # 计算中位数
+        D_MAD = (data[col] - x_M).abs().median()  # 计算中位数绝对偏差
 
-    panel = pd.concat(frames, ignore_index=True)
-    panel["month"] = panel["month"].astype(int)
-    return panel
+        # 应用去极值法
+        data[col] = np.where(data[col] > x_M + n * D_MAD, x_M + n * D_MAD,
+                             np.where(data[col] < x_M - n * D_MAD, x_M - n * D_MAD, data[col]))
+    return data
 
-
-def factor_columns(panel: pd.DataFrame) -> list[str]:
-    required = {"month", "stock", "status", "return"}
-    return [col for col in panel.columns if col not in required]
-
-
-def label_by_month(panel: pd.DataFrame) -> pd.DataFrame:
-    panel = panel.copy()
-    panel["label"] = 0
-
-    def assign(group: pd.DataFrame) -> pd.DataFrame:
-        pct_rank = group["return"].rank(pct=True)
-        group.loc[pct_rank > 0.7, "label"] = 1
-        group.loc[pct_rank < 0.3, "label"] = -1
-        return group
-
-    return panel.groupby("month", group_keys=False).apply(assign)
-
-
-def winsorize_mad(panel: pd.DataFrame, factors: list[str], threshold: float = 1.5) -> pd.DataFrame:
-    panel = panel.copy()
-
-    def winsorize(group: pd.DataFrame) -> pd.DataFrame:
-        medians = group[factors].median()
-        mad = (group[factors] - medians).abs().median().replace(0, np.nan)
-        lower = medians - threshold * mad
-        upper = medians + threshold * mad
-        group[factors] = group[factors].clip(lower=lower, upper=upper, axis=1)
-        return group
-
-    return panel.groupby("month", group_keys=False).apply(winsorize)
-
-
-def prepare_train_test(
-    panel: pd.DataFrame,
-    train_start: int,
-    train_end: int,
-    test_start: int,
-    test_end: int,
-) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
-    factors = factor_columns(panel)
-    panel = panel[panel["status"] == 1].copy()
-    panel = panel.dropna(subset=factors + ["return"])
-    panel = winsorize_mad(panel, factors)
-
-    train = panel[(panel["month"] >= train_start) & (panel["month"] <= train_end)].copy()
-    test = panel[(panel["month"] >= test_start) & (panel["month"] <= test_end)].copy()
-    train = label_by_month(train)
-
+# 标准化因子
+def standardize_features(data):
     scaler = StandardScaler()
-    train[factors] = scaler.fit_transform(train[factors])
-    test[factors] = scaler.transform(test[factors])
+    data.iloc[:, 4:74] = scaler.fit_transform(data.iloc[:, 4:74])  # 标准化特征
+    return data
 
-    return train, test, factors
+# 训练和预测
+def train_and_predict(train_data, test_data):
+    X_train = train_data.iloc[:, 4:74]  # 因子数据
+    y_train = train_data['label']
 
-
-def fit_model(train: pd.DataFrame, factors: list[str]) -> LogisticRegression:
-    labeled = train[train["label"] != 0]
     model = LogisticRegression(max_iter=1000)
-    model.fit(labeled[factors], labeled["label"])
-    return model
+    model.fit(X_train[y_train != 0], y_train[y_train != 0])  # 只训练正反例
+
+    X_test = test_data.iloc[:, 4:74]
+    probabilities = model.predict_proba(X_test)[:, 1]  # 获取正例的概率
+    
+    return probabilities
+
+def calculate_performance_metrics(data, A):
+    performance_metrics = []
+    cum_return = 1  # 初始化累计收益
+    cum_return_monthly=[]
+    return_monthly=[]
+    
+    for month, group in data.groupby('Month'):
+        top_a_stocks = group.nlargest(A, 'Probability')
+        
+        total_probability = top_a_stocks['Probability'].sum()
+        if total_probability == 0:
+            continue  # 避免除以零
+        
+        top_a_stocks['Weight'] = top_a_stocks['Probability'] / total_probability
+        top_a_stocks['Weighted Return'] = top_a_stocks['Weight'] * top_a_stocks['return']
+        
+        total_return = top_a_stocks['Weighted Return'].sum()
+        return_monthly.append(total_return)
+        annualized_return = (1+total_return) ** 12-1
+        if len(return_monthly)==1:
+            annualized_volatility=0
+        else:    
+            annualized_volatility = np.std(return_monthly, ddof=1)*12**0.5
+        
+        sharpe_ratio = annualized_return / annualized_volatility if annualized_volatility != 0 else np.nan
+        
+        # 更新累计收益和峰值
+        cum_return = cum_return * (1 + total_return)
+        cum_return_monthly.append(cum_return)
+
+        # 计算回撤
+        if len(cum_return_monthly)==1:
+            monthly_drawdown=0
+        else:
+            monthly_drawdown = (cum_return_monthly[-1]-cum_return_monthly[-2])/cum_return_monthly[-2]
+        max_drawdown = (max(cum_return_monthly)- min(cum_return_monthly))/max(cum_return_monthly)
+        
+        win_rate = (top_a_stocks['return'] > 0).mean()
+        
+        performance_metrics.append({
+            'Month': month,
+            'Annualized Return': annualized_return,
+            'Annualized Volatility': annualized_volatility,
+            'Sharpe Ratio': sharpe_ratio,
+            'Monthly Drawdown': monthly_drawdown,
+            'Max Drawdown To Date': max_drawdown,
+            'Win Rate': win_rate
+        })
+
+    return pd.DataFrame(performance_metrics)
+
+def plot_monthly_portfolio_value(monthly_returns):
+    # 计算每月组合净值
+    portfolio_values = (1 + monthly_returns).cumprod()  # 计算组合净值
+    plt.figure(figsize=(10, 6))
+    plt.plot(portfolio_values, label='Monthly Portfolio Value', color='blue')
+    plt.title('Monthly Portfolio Value Over Time')
+    plt.xlabel('Months')
+    plt.ylabel('Portfolio Value')
+    plt.axhline(1, color='red', linestyle='--', label='Initial Value = 1')
+    plt.xticks(rotation=45)
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+def calculate_monthly_returns(results_melted, A):
+    monthly_returns = []
+    
+    for month, group in results_melted.groupby('Month'):
+        top_a_stocks = group.nlargest(A, 'Probability')
+        
+        total_probability = top_a_stocks['Probability'].sum()
+        if total_probability > 0:
+            top_a_stocks['Weight'] = top_a_stocks['Probability'] / total_probability
+            monthly_return = (top_a_stocks['Weight'] * top_a_stocks['return']).sum()
+            monthly_returns.append(monthly_return)
+        else:
+            monthly_returns.append(0)  # 如果没有可用的股票，返回0
+
+    return pd.Series(monthly_returns, index=results_melted['Month'].unique())
+
+def main():
+    try:
+        folder = '.'  # 设置为当前目录
+        data = load_data(folder)
+
+        # 将数据分为训练集和验证集
+        train_data = data[(data['month'].astype(int) >= 82) & (data['month'].astype(int) <= 153)]
+        test_data = data[(data['month'].astype(int) >= 154) & (data['month'].astype(int) <= 243)]
+
+        # 过滤参与训练的样本
+        train_data = train_data[train_data['status'] == 1]
+        test_data = test_data[test_data['status'] == 1]
+
+        # 创建标签
+        train_data = create_labels(train_data)
+
+        # 应用中位数去极值法
+        train_data = depolarize(train_data)
+        test_data = depolarize(test_data)
+
+        # 标准化因子
+        train_data = standardize_features(train_data)
+        test_data = standardize_features(test_data)
+
+        # 获取月份并排序
+        months = sorted(test_data['month'].unique())
+
+        # 用户输入每月选股的数量 A
+        A = int(input("请输入每月选股的数量 A: "))
+
+        # 存储每个月的预测结果
+        results = pd.DataFrame(index=test_data['stock'].unique(), columns=months)
+
+        # 定义年份映射
+        year_mapping = {
+        154: 2011, 155: 2011, 156: 2011, 157: 2011, 158: 2011, 159: 2011,
+        160: 2011, 161: 2011, 162: 2011, 163: 2011, 164: 2011, 165: 2011,
+        166: 2012, 167: 2012, 168: 2012, 169: 2012, 170: 2012, 171: 2012,
+        172: 2012, 173: 2012, 174: 2012, 175: 2012, 176: 2012, 177: 2012,
+        178: 2013, 179: 2013, 180: 2013, 181: 2013, 182: 2013, 183: 2013,
+        184: 2013, 185: 2013, 186: 2013, 187: 2013, 188: 2013, 189: 2013,
+        190: 2014, 191: 2014, 192: 2014, 193: 2014, 194: 2014, 195: 2014,
+        196: 2014, 197: 2014, 198: 2014, 199: 2014, 200: 2014, 201: 2014,
+        202: 2015, 203: 2015, 204: 2015, 205: 2015, 206: 2015, 207: 2015,
+        208: 2015, 209: 2015, 210: 2015, 211: 2015, 212: 2015, 213: 2015,
+        214: 2016, 215: 2016, 216: 2016, 217: 2016, 218: 2016, 219: 2016,
+        220: 2016, 221: 2016, 222: 2016, 223: 2016, 224: 2016, 225: 2016,
+        226: 2017, 227: 2017, 228: 2017, 229: 2017, 230: 2017, 231: 2017,
+        232: 2017, 233: 2017, 234: 2017, 235: 2017, 236: 2017, 237: 2017,
+        238: 2018, 239: 2018, 240: 2018, 241: 2018, 242: 2018, 243: 2018
+    }
+
+        for month in months:
+            month_data = test_data[test_data['month'] == month]
+            if not month_data.empty:
+                probabilities = train_and_predict(train_data, month_data)
+                results.loc[month_data['stock'], month] = probabilities
 
 
-def predict_probabilities(test: pd.DataFrame, factors: list[str], model: LogisticRegression) -> pd.DataFrame:
-    scored = test[["month", "stock", "return"]].copy()
-    scored["probability"] = model.predict_proba(test[factors])[:, 1]
-    return scored
+        # 生成年份和月份的映射
+        results.index.name = 'Stock'
+        results.columns = [
+            f"{year_mapping[int(month)]}-{(int(month) - 154) % 12 + 1:02d}" 
+            for month in results.columns if month.isdigit()
+        ]
 
 
-def probability_matrix(scored: pd.DataFrame) -> pd.DataFrame:
-    matrix = scored.pivot(index="stock", columns="month", values="probability")
-    matrix = matrix.sort_index(axis=0).sort_index(axis=1)
-    return matrix
+ 
+        results_melted = results.reset_index().melt(id_vars='Stock', var_name='Month', value_name='Probability')
+        results_melted = results_melted.merge(data[['stock', 'return']], left_on='Stock', right_on='stock', how='left')
+        # 确保 Probability 列是数值型
+        results_melted['Probability'] = pd.to_numeric(results_melted['Probability'], errors='coerce')
+        
+        performance_metrics = calculate_performance_metrics(results_melted,A)
 
+        # 计算每月组合收益率
+        monthly_returns = calculate_monthly_returns(results_melted, A)
 
-def backtest_top_n(scored: pd.DataFrame, top_n: int) -> tuple[pd.DataFrame, pd.Series]:
-    monthly_returns: list[tuple[int, float]] = []
+        # 绘制每月组合净值
+        plot_monthly_portfolio_value(monthly_returns)
+        # 保存绩效指标
+        performance_metrics.to_csv('performance_metrics.csv')
 
-    for month, group in scored.groupby("month"):
-        selected = group.nlargest(top_n, "probability").copy()
-        total_probability = selected["probability"].sum()
-        if total_probability <= 0:
-            monthly_returns.append((month, 0.0))
-            continue
+        # 保存结果为包含年份的 CSV 文件
+        results.to_csv('predictions_with_years.csv')
 
-        weights = selected["probability"] / total_probability
-        monthly_return = float((weights * selected["return"]).sum())
-        monthly_returns.append((month, monthly_return))
+    except Exception as e:
+        print(f"An error occurred: {e}")
 
-    returns = pd.Series(
-        data=[value for _, value in monthly_returns],
-        index=[month for month, _ in monthly_returns],
-        name="monthly_return",
-    )
-    net_value = (1 + returns).cumprod()
-    running_max = net_value.cummax()
-    drawdown = net_value / running_max - 1
-
-    metrics = pd.DataFrame(
-        {
-            "month": returns.index,
-            "monthly_return": returns.values,
-            "net_value": net_value.values,
-            "annualized_return_to_date": net_value.values ** (12 / np.arange(1, len(net_value) + 1)) - 1,
-            "annualized_volatility_to_date": returns.expanding(2).std().values * np.sqrt(12),
-            "max_drawdown_to_date": drawdown.expanding().min().values,
-        }
-    )
-    metrics["sharpe_to_date"] = (
-        metrics["annualized_return_to_date"] / metrics["annualized_volatility_to_date"]
-    )
-
-    return metrics, net_value
-
-
-def plot_net_value(net_value: pd.Series, output_path: Path) -> None:
-    fig, ax = plt.subplots(figsize=(10, 6))
-    net_value.plot(ax=ax, color="#2563eb", linewidth=2)
-    ax.axhline(1.0, color="#dc2626", linestyle="--", linewidth=1)
-    ax.set_title("Monthly Portfolio Net Value")
-    ax.set_xlabel("Month index")
-    ax.set_ylabel("Net value")
-    ax.grid(alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=160)
-    plt.close(fig)
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train and backtest an A-share factor stock-selection model.")
-    parser.add_argument("--data-dir", type=Path, required=True, help="Directory containing monthly factor CSV files.")
-    parser.add_argument("--output-dir", type=Path, default=Path("results/task1"), help="Directory for outputs.")
-    parser.add_argument("--top-n", type=int, default=30, help="Number of stocks selected each month.")
-    parser.add_argument("--train-start", type=int, default=82, help="First in-sample month index.")
-    parser.add_argument("--train-end", type=int, default=153, help="Last in-sample month index.")
-    parser.add_argument("--test-start", type=int, default=154, help="First out-of-sample month index.")
-    parser.add_argument("--test-end", type=int, default=243, help="Last out-of-sample month index.")
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-
-    panel = load_panel(args.data_dir)
-    train, test, factors = prepare_train_test(
-        panel,
-        train_start=args.train_start,
-        train_end=args.train_end,
-        test_start=args.test_start,
-        test_end=args.test_end,
-    )
-    model = fit_model(train, factors)
-    scored = predict_probabilities(test, factors, model)
-
-    probability_matrix(scored).to_csv(args.output_dir / "predictions_with_years.csv")
-    metrics, net_value = backtest_top_n(scored, args.top_n)
-    metrics.to_csv(args.output_dir / f"performance_metrics_top_{args.top_n}.csv", index=False)
-    plot_net_value(net_value, args.output_dir / f"monthly_portfolio_value_top_{args.top_n}.png")
-
-
-if __name__ == "__main__":
-    main()
+main()
