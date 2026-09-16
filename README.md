@@ -16,7 +16,7 @@ Task 2 implements a GMAT-style global multi-asset allocation prototype. The stra
 
 The code includes GMAT2-style and GMAT3-style configurations. It uses reproducible synthetic price paths to validate the implementation structure, rather than publishing or relying on proprietary market data.
 
-Code: `src/task2_gmat_style_allocation.py`
+Code: `src/task2_gmat2_style_allocation.py` and `src/task2_gmat3_style_allocation.py`
 
 ## Repository Structure
 
@@ -24,7 +24,8 @@ Code: `src/task2_gmat_style_allocation.py`
 .
 ├── src/
 │   ├── task1_factor_stock_selection.py
-│   └── task2_gmat_style_allocation.py
+│   └── task2_gmat2_style_allocation.py
+│   └── task2_gmat3_style_allocation.py
 ├── requirements.txt
 └── README.md
 ```
@@ -46,7 +47,11 @@ python src/task1_factor_stock_selection.py --data-dir path/to/csv_demo --top-n 3
 Run Task 2 with synthetic data:
 
 ```bash
-python src/task2_gmat_style_allocation.py --version gmat3 --output-dir outputs/task2
+python src/task2_gmat2_style_allocation.py --version gmat3 --output-dir outputs/task2
+```
+
+```bash
+python src/task2_gmat3_style_allocation.py --version gmat3 --output-dir outputs/task2
 ```
 
 ## Notes
