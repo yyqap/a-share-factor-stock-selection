@@ -30,29 +30,6 @@ Code: `src/task2_gmat2_style_allocation.py` and `src/task2_gmat3_style_allocatio
 └── README.md
 ```
 
-## Quick Start
-
-Install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-Run Task 1 with local monthly factor CSV files:
-
-```bash
-python src/task1_factor_stock_selection.py --data-dir path/to/csv_demo --top-n 30 --output-dir outputs/task1
-```
-
-Run Task 2 with synthetic data:
-
-```bash
-python src/task2_gmat2_style_allocation.py --version gmat3 --output-dir outputs/task2
-```
-
-```bash
-python src/task2_gmat3_style_allocation.py --version gmat3 --output-dir outputs/task2
-```
 
 ## Notes
 
